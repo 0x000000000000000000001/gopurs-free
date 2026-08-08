@@ -4,12 +4,12 @@ import "gopurs/output/gopurs_runtime"
 
 type FreeObj struct {
 	Tag       int // 0 = Pure, 1 = Bind
-	ValueOrFa any
+	ValueOrFa gopurs_runtime.Value
 	Binds     any
 }
 
 type BindLeaf struct {
-	K any
+	K gopurs_runtime.Value
 }
 
 type BindNode struct {
@@ -17,16 +17,22 @@ type BindNode struct {
 	Right any
 }
 
-func PureImpl(a any) any {
+func PureImpl(a gopurs_runtime.Value) any {
 	return &FreeObj{Tag: 0, ValueOrFa: a, Binds: nil}
 }
 
-func LiftF(fa any) any {
+func LiftF(fa gopurs_runtime.Value) any {
 	return &FreeObj{Tag: 1, ValueOrFa: fa, Binds: nil}
 }
 
-func BindImpl(freeAny any, k any) any {
-	free := freeAny.(*FreeObj)
+func BindImpl(freeAny gopurs_runtime.Value, k gopurs_runtime.Value) any {
+	var free *FreeObj
+	if freeAny.Type == gopurs_runtime.TypeAny {
+		free = (*(*any)(freeAny.UnsafePtr)).(*FreeObj)
+	} else {
+		free = (*FreeObj)(freeAny.UnsafePtr) // Try direct unbox
+	}
+
 	var newBinds any
 	if free.Binds == nil {
 		newBinds = &BindLeaf{K: k}
@@ -36,17 +42,25 @@ func BindImpl(freeAny any, k any) any {
 	return &FreeObj{Tag: free.Tag, ValueOrFa: free.ValueOrFa, Binds: newBinds}
 }
 
-func ResumePrime(k any, j any, fAny any) any {
-	f := fAny.(*FreeObj)
+func ResumePrime(k gopurs_runtime.Value, j gopurs_runtime.Value, fAny gopurs_runtime.Value) any {
+	var f *FreeObj
+	if fAny.Type == gopurs_runtime.TypeAny {
+		f = (*(*any)(fAny.UnsafePtr)).(*FreeObj)
+	} else {
+		f = (*FreeObj)(fAny.UnsafePtr)
+	}
+
 	for {
 		if f.Tag == 0 { // Pure
 			curr := f.Binds
 			var stack []any
-			var first any
+			var first gopurs_runtime.Value
+			hasFirst := false
 
 			for curr != nil {
 				if leaf, ok := curr.(*BindLeaf); ok {
 					first = leaf.K
+					hasFirst = true
 					break
 				} else if node, ok := curr.(*BindNode); ok {
 					stack = append(stack, node.Right)
@@ -54,8 +68,8 @@ func ResumePrime(k any, j any, fAny any) any {
 				}
 			}
 
-			if first == nil {
-				return gopurs_runtime.Apply(j, gopurs_runtime.Box(f.ValueOrFa)).Unbox()
+			if !hasFirst {
+				return gopurs_runtime.Apply(j, f.ValueOrFa)
 			}
 
 			var restBinds any
@@ -67,8 +81,13 @@ func ResumePrime(k any, j any, fAny any) any {
 				}
 			}
 
-			f2Any := gopurs_runtime.Apply(first, gopurs_runtime.Box(f.ValueOrFa)).Unbox()
-			f2 := f2Any.(*FreeObj)
+			f2Any := gopurs_runtime.Apply(first, f.ValueOrFa)
+			var f2 *FreeObj
+			if f2Any.Type == gopurs_runtime.TypeAny {
+				f2 = (*(*any)(f2Any.UnsafePtr)).(*FreeObj)
+			} else {
+				f2 = (*FreeObj)(f2Any.UnsafePtr)
+			}
 
 			var newBinds any
 			if f2.Binds == nil {
@@ -81,17 +100,15 @@ func ResumePrime(k any, j any, fAny any) any {
 
 			f = &FreeObj{Tag: f2.Tag, ValueOrFa: f2.ValueOrFa, Binds: newBinds}
 		} else { // Lift
-			cont := func(b any) any {
-				return &FreeObj{Tag: 0, ValueOrFa: b, Binds: f.Binds}
+			cont := func(b gopurs_runtime.Value) gopurs_runtime.Value {
+				return gopurs_runtime.Box(&FreeObj{Tag: 0, ValueOrFa: b, Binds: f.Binds})
 			}
-			kfAny := gopurs_runtime.Apply(k, gopurs_runtime.Box(f.ValueOrFa)).Unbox()
-			// kf is (b -> Free f a) -> r
-			// We pass the continuation 'cont'
-			// In gopurs, PureScript functions take one boxed value and return a boxed value
-			contWrapped := func(p0_0 any) any {
+			kfAny := gopurs_runtime.Apply(k, f.ValueOrFa)
+			
+			contWrapped := gopurs_runtime.Func(func(p0_0 gopurs_runtime.Value) gopurs_runtime.Value {
 				return cont(p0_0)
-			}
-			return gopurs_runtime.Apply(kfAny, gopurs_runtime.Box(contWrapped)).Unbox()
+			})
+			return gopurs_runtime.Apply(kfAny, contWrapped)
 		}
 	}
 }
